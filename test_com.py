@@ -1,4 +1,7 @@
-from sense_hat import SenseHat
+try:
+    from sense_hat import SenseHat  # real hardware
+except Exception:  # fallback for environments without RTIMU
+    from sense_emu import SenseHat
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 import sys
@@ -15,6 +18,76 @@ GREEN = [0, 255, 0]
 BLUE = [0, 0, 255]
 YELLOW = [255, 255, 0]
 CLEAR = [0, 0, 0]
+
+WHITE = [255, 255, 255]
+
+digit_patterns = {
+    0: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    1: [
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, WHITE, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    2: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    3: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+}
+
+def show_digit(digit: int, duration: float = 4.0):
+    pattern = digit_patterns.get(digit)
+    if pattern:
+        sense.set_pixels(pattern)
+        time.sleep(duration)
+        sense.clear()
+
+def handle_shuffle(new_order: List[int]):
+    global layout, operation_lock_until
+    old_order = layout[:]
+    layout = new_order
+    # update adjacency
+    for dev_id, adj in compute_adj_from_layout(layout).items():
+        devices[dev_id].adj = adj
+
+    operation_lock_until = time.time() + 10
+
+    target_pi = old_order[new_order.index(MY_PI_ID)]
+    show_digit(target_pi)
+
+    # redraw cursors after digit display
+    for dev in devices.values():
+        if dev.onMyPi:
+            draw_cursor(dev.position[0], dev.position[1], dev.color)
 
 # RGB値から変数名を取得する関数
 def get_color_name(rgb):
@@ -78,6 +151,23 @@ cursor_priority = sorted(devices.keys())
 
 #鬼のラズパイのID
 HUNTER_ID=0
+
+# --- layout handling ---
+layout = [0, 1, 2, 3]  # [top-left, top-right, bottom-left, bottom-right]
+
+def compute_adj_from_layout(order: List[int]) -> Dict[int, Tuple[int, int]]:
+    mapping = {0: (2, 1), 1: (3, 0), 2: (0, 3), 3: (1, 2)}
+    result = {}
+    for pos, dev_id in enumerate(order):
+        up_down = order[mapping[pos][0]]
+        left_right = order[mapping[pos][1]]
+        result[dev_id] = (up_down, left_right)
+    return result
+
+for dev_id, adj in compute_adj_from_layout(layout).items():
+    devices[dev_id].adj = adj
+
+operation_lock_until = 0  # when normal operation resumes
 
 exit_flag = False  # プログラム終了要求フラグ
 
@@ -166,7 +256,6 @@ def debug_device_list(devices_list):
 
 # 加速度センサーの値から傾きの方向を判定する
 def get_direction():
-    sense = SenseHat()
     orientation = sense.get_orientation_radians()
 
     # ピッチとロールを整数値として抽出（四捨五入）
@@ -196,6 +285,24 @@ def send_message(message, dst_addr):
         # sock.bind((SRC_ADDR, SRC_PORT))
         sock.sendto(message.encode(), (dst_addr, DST_PORT))
         print(f"Send {message} to {dst_addr}")
+
+def broadcast_message(message):
+    for dev in devices.values():
+        send_message(message, dev.addr)
+
+def trigger_shuffle():
+    new_layout = layout[:]
+    while new_layout == layout:
+        random.shuffle(new_layout)
+    msg = "SHUFFLE " + ",".join(str(i) for i in new_layout)
+    broadcast_message(msg)
+    handle_shuffle(new_layout)
+
+def check_shuffle_button():
+    for event in sense.stick.get_events():
+        if event.action == 'pressed' and event.direction == 'middle':
+            return True
+    return False
 
 # 移動先の座標を求める & 遷移判定
 def get_new_position(old_x, old_y, direction):
@@ -308,6 +415,9 @@ def network_listener():
                     next_addr = devices.get(next_pi).addr
                     send_message(f"DRAW {x} {y} {MY_PI_ID} {cursor_id}", next_addr)
                     my_cursor_locator = next_addr
+            elif command == "SHUFFLE":
+                new_order = list(map(int, parts[1].split(',')))
+                handle_shuffle(new_order)
             elif command == "CATCH":
                 num = int(parts[1])
                 caught_ids = list(map(int, parts[2:2+num])) #捕獲された逃走者のID
@@ -396,6 +506,14 @@ if __name__ == "__main__":
 
     try:
         while not exit_flag:
+            if time.time() > operation_lock_until and check_shuffle_button():
+                trigger_shuffle()
+                continue
+
+            if time.time() < operation_lock_until:
+                time.sleep(0.1)
+                continue
+
             direction = get_direction()
 
             if direction:
