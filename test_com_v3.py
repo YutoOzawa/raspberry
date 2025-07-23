@@ -426,25 +426,28 @@ def network_listener():
                 direction = parts[1]
                 cursor_id = int(parts[2])
 
-                
 
-                # 送信元Piを特定
+
+                # 送信元Piを特定（操作しているPi）
                 sender_ip = addr_port[0]
                 sender_id = addr_to_id.get(sender_ip)
                 sender = devices[sender_id]
-                
+
+                # 実際に動かすカーソルのデバイス情報
+                cursor_dev = devices[cursor_id]
+
                 # カーソルの現在位置
-                x = sender.position[0]
-                y = sender.position[1]
+                x = cursor_dev.position[0]
+                y = cursor_dev.position[1]
 
                 # 移動先座標の計算と遷移判定
                 new_x, new_y, hasCrossed = get_new_position(
                     x,
                     y,
                     direction,
-                    sender.cursor_size,
-                    sender.move_step,
-                    sender.adj,
+                    cursor_dev.cursor_size,
+                    cursor_dev.move_step,
+                    MY_PI.adj,
                 )
                 print(f"[MOVE] cursor_id={cursor_id} (x, y)=({x}, {y}), new=({new_x}, {new_y})")
 
@@ -456,17 +459,17 @@ def network_listener():
                     if next_pi == MY_PI_ID:
                         #if is_movable(new_x, new_y): # 重複判定
                         cursor_leave(x, y, cursor_id)
-                        cursor_enter(new_x, new_y, sender.color, cursor_id)
-                        sender.position = [new_x, new_y]
+                        cursor_enter(new_x, new_y, cursor_dev.color, cursor_id)
+                        cursor_dev.position = [new_x, new_y]
                     else:
                         send_message(f"CROSS {next_pi} {new_x} {new_y} {cursor_id}", sender.addr)
-                        sender.onMyPi = False
+                        cursor_dev.onMyPi = False
                         cursor_leave(x, y, cursor_id)
                 else:
-                    #update_position(x, y, new_x, new_y, sender)
+                    #update_position(x, y, new_x, new_y, cursor_dev)
                     cursor_leave(x, y, cursor_id)
-                    cursor_enter(new_x, new_y, sender.color, cursor_id)
-                    sender.position = [new_x, new_y]
+                    cursor_enter(new_x, new_y, cursor_dev.color, cursor_id)
+                    cursor_dev.position = [new_x, new_y]
 
             elif command == "DRAW": # 他のPiのカーソルを新たに描画
                 x, y, pi, cursor_id = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
