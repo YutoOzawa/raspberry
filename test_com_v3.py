@@ -87,11 +87,14 @@ def handle_shuffle(new_order: List[int]):
 
     operation_lock_until = time.time() + 10
 
-    # build a mapping from each moving device to the device currently
-    # located at its destination. this guarantees all displayed numbers
-    # are unique and drawn from the set of alive identifiers.
-    n = min(len(old_order), len(new_order))
-    dest_map = {new_order[i]: old_order[i] for i in range(n)}
+    # Map each device to the identifier currently occupying its
+    # destination.  Using the old order ensures every displayed digit is
+    # drawn exactly once from the set of active Pis.
+    dest_map = {}
+    for i, dev_id in enumerate(new_order):
+        if i < len(old_order):
+            dest_map[dev_id] = old_order[i]
+
     target_pi = dest_map.get(MY_PI_ID, MY_PI_ID)
 
     show_digit(target_pi)
@@ -323,7 +326,7 @@ def broadcast_message(message):
 
 def trigger_shuffle():
     """Shuffle the layout of currently active devices."""
-    active = [dev_id for dev_id in layout if devices[dev_id].alive]
+    active = [dev.id for dev in devices.values() if dev.alive]
     if len(active) <= 1:
         return
 
