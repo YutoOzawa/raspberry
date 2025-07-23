@@ -344,42 +344,47 @@ def check_shuffle_button():
 
 # 移動先の座標を求める & 遷移判定
 def get_new_position(old_x, old_y, direction, size, step, adj):
+    """Return the next position of a cursor and whether it crossed to another Pi."""
     hasCrossed = False
 
+    # Compute tentative position based on direction and step size
     new_x, new_y = old_x, old_y
     if direction == "up":
-        new_y += step
-    if direction == "down":
         new_y -= step
+    if direction == "down":
+        new_y += step
     if direction == "left":
-        new_x += step
-    if direction == "right":
         new_x -= step
+    if direction == "right":
+        new_x += step
 
-    if new_y > HEIGHT - size:
+    # Vertical bounds
+    if new_y < 0:
         if adj[0] != NO_NEIGHBOR:
-            new_y = 0
+            new_y = HEIGHT - size
             hasCrossed = True
         else:
-            new_y = HEIGHT - size
-    elif new_y < 0:
+            new_y = 0
+    elif new_y > HEIGHT - size:
         if adj[2] != NO_NEIGHBOR:
-            new_y = HEIGHT - size
+            new_y = 0
             hasCrossed = True
         else:
-            new_y = 0
+            new_y = HEIGHT - size
+
+    # Horizontal bounds
+    if new_x < 0:
+        if adj[3] != NO_NEIGHBOR:
+            new_x = WIDTH - size
+            hasCrossed = True
+        else:
+            new_x = 0
     elif new_x > WIDTH - size:
         if adj[1] != NO_NEIGHBOR:
             new_x = 0
             hasCrossed = True
         else:
             new_x = WIDTH - size
-    elif new_x < 0:
-        if adj[3] != NO_NEIGHBOR:
-            new_x = WIDTH - size
-            hasCrossed = True
-        else:
-            new_x = 0
 
     return new_x, new_y, hasCrossed
 
