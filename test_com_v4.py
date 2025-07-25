@@ -16,6 +16,9 @@ BLUE = [0, 0, 255]
 YELLOW = [255, 255, 0]
 CLEAR = [0, 0, 0]
 
+# 一時停止時間（秒）
+PAUSE_DURATION = 3
+
 # RGB値から変数名を取得する関数
 def get_color_name(rgb):
     color_dict = {
@@ -80,6 +83,7 @@ cursor_priority = sorted(devices.keys())
 HUNTER_ID=0
 
 exit_flag = False  # プログラム終了要求フラグ
+operation_lock_until = 0  # 通常操作が再開する時刻
 
 
 # 指定された座標にカーソルを描画する
@@ -234,10 +238,42 @@ def random_even_coordinate(max_value):
     even_range = list(range(0, max_value + 1, 2))  # 0, 2, 4, 6 ...
     return random.choice(even_range)
 
+# スティック押し込みを検知
+def check_swap_button():
+    for event in sense.stick.get_events():
+        if event.action == 'pressed' and event.direction == 'middle':
+            return True
+    return False
+
+# ラズパイの位置入れ替えをトリガー
+def trigger_swap():
+    global operation_lock_until
+    alive_ids = [dev.id for dev in devices.values() if dev.alive]
+    if len(alive_ids) <= 1:
+        return
+    dest_ids = alive_ids[:]
+    while True:
+        random.shuffle(dest_ids)
+        if all(s != d for s, d in zip(alive_ids, dest_ids)):
+            break
+    pairs = list(zip(alive_ids, dest_ids))
+    display_swap_pairs(pairs)
+    operation_lock_until = time.time() + PAUSE_DURATION
+
+# テレポート先をSense HATに表示する
+def display_swap_pairs(pairs: List[Tuple[int, int]]):
+    if not pairs:
+        return
+    message = ", ".join(f"{src}->{dst}" for src, dst in pairs)
+    sense.show_message(message, text_colour=YELLOW)
+    time.sleep(1)
+    sense.clear()
+
 # ネットワークリスナー（サーバプログラム）
 def network_listener():
     global my_cursor_locator
     global exit_flag
+    global operation_lock_until
     
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind((MY_PI.addr, DST_PORT))
@@ -248,6 +284,9 @@ def network_listener():
             print(f"Received {msg} from {addr_port[0]}")
             parts = msg.split(' ')
             command = parts[0]
+
+            if time.time() < operation_lock_until and command in {"MOVE", "DRAW", "CROSS"}:
+                continue
            
 
             if command == "MOVE":
@@ -347,14 +386,16 @@ def network_listener():
                     print(f"[CATCH] Local alive devices on Pi{MY_PI_ID}: {[dev.id for dev in local_alive_devices]}")
 
                     # === ここでテレポート処理を追加 ===
-                    alive_pi_ids = [dev.id for dev in devices.values() if dev.alive] #テレポート先候補
-                    random.shuffle(alive_pi_ids) 
+                    alive_pi_ids = [dev.id for dev in devices.values() if dev.alive]
+                    random.shuffle(alive_pi_ids)
+                    swap_pairs = []
                     for dev, target_pi_id in zip(local_alive_devices, alive_pi_ids):
                         target_x = random_even_coordinate(WIDTH - CURSOR_SIZE)
                         target_y = random_even_coordinate(HEIGHT - CURSOR_SIZE)
                         dest_pos = [target_x, target_y]
 
                         print(f"[CATCH] Teleporting Pi{dev.id} to Pi{target_pi_id} at {dest_pos}")
+                        swap_pairs.append((dev.id, target_pi_id))
 
                         if target_pi_id == MY_PI_ID:
                             # 自分のPiなら直接描画
@@ -365,6 +406,9 @@ def network_listener():
                             # 他のPiに転送
                             send_message(f"CROSS {target_pi_id} {dest_pos[0]} {dest_pos[1]} {dev.id}", dev.addr)
                             cursor_leave(dev.position[0], dev.position[1], dev.id)
+
+                    display_swap_pairs(swap_pairs)
+                    operation_lock_until = time.time() + PAUSE_DURATION
 
                     #MY_PI.alive = False
                     sense.show_message("CAUGHT!", text_colour=RED)
@@ -396,6 +440,15 @@ if __name__ == "__main__":
 
     try:
         while not exit_flag:
+
+            if time.time() > operation_lock_until and check_swap_button():
+                trigger_swap()
+                continue
+
+            if time.time() < operation_lock_until:
+                time.sleep(0.1)
+                continue
+
             direction = get_direction()
 
             if direction:
