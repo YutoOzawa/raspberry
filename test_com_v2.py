@@ -215,58 +215,65 @@ def draw_cursor(x, y, color, size):
                 sense.set_pixel(x + dx, y + dy, color)
 
 # そのピクセルに現在存在するカーソルのリストを取得
+def cursor_covers_pixel(dev: DeviceInfo, x: int, y: int) -> bool:
+    """Return True if the given pixel is within dev's cursor area."""
+    dev_x, dev_y = dev.position
+    return (
+        dev_x <= x < dev_x + dev.cursor_size and
+        dev_y <= y < dev_y + dev.cursor_size
+    )
+
+
 def get_overlapping_cursors(x, y):
     print_all_cursor_status()
     overlapping = []
     for dev_id in cursor_priority:
         dev = devices[dev_id]
-        if dev.onMyPi and dev.position == [x, y]:
+        if dev.onMyPi and cursor_covers_pixel(dev, x, y):
             overlapping.append(dev)
-    
+
     return overlapping
             
 
 # カーソルがあるマスから動いた時に、元居たマスのカーソルを消す
 #（重複判定し、カーソルの移動後のマスに白か、別のカーソルを表示するかも判定）
 def cursor_leave(x, y, target_id):
-    overlapping = get_overlapping_cursors(x, y)
-    overlapping_display = [(dev.id, get_color_name(dev.color)) for dev in overlapping]
-    print(f"[{x},{y}] overlapping: {overlapping_display}")
-    filtered = [dev for dev in overlapping if dev.id != target_id]
-    filtered_display = [(dev.id, get_color_name(dev.color)) for dev in filtered]
-    print(f"[{x},{y}] overlapping: {filtered_display} in cursor_leave target_id={target_id}")
-    if len(filtered) > 0:
-        top = min(filtered, key=lambda d: cursor_priority.index(d.id))
-        draw_cursor(x, y, top.color, top.cursor_size)
-    else:
-        draw_cursor(x, y, CLEAR, devices[target_id].cursor_size)
+    size = devices[target_id].cursor_size
+    for dx in range(size):
+        for dy in range(size):
+            cx, cy = x + dx, y + dy
+            overlapping = get_overlapping_cursors(cx, cy)
+            filtered = [dev for dev in overlapping if dev.id != target_id]
+            if len(filtered) > 0:
+                top = min(filtered, key=lambda d: cursor_priority.index(d.id))
+                sense.set_pixel(cx, cy, top.color)
+            else:
+                sense.set_pixel(cx, cy, CLEAR)
 
 # カーソルがあるマスから動いた時に、移動先のカーソルを表示
 #（重複判定し、カーソルの移動後の移動先が自身のカーソルか、別のカーソルを表示するかも判定）
 def cursor_enter(new_x, new_y, color, target_id):
-    overlapping = get_overlapping_cursors(new_x, new_y)
-    overlapping.append(devices[target_id]) #移動先には自カーソルがないので、自カーソルを追加
-    overlapping_display = [(dev.id, get_color_name(dev.color)) for dev in overlapping]
-    print(f"[{new_x},{new_y}] overlapping: {overlapping_display} in cursor_enter")
-
-    top = min(overlapping, key=lambda d: cursor_priority.index(d.id))
-    draw_cursor(new_x, new_y, top.color, top.cursor_size)
-    
+    size = devices[target_id].cursor_size
+    all_overlapping = []
+    for dx in range(size):
+        for dy in range(size):
+            cx, cy = new_x + dx, new_y + dy
+            overlapping = get_overlapping_cursors(cx, cy)
+            overlapping.append(devices[target_id])
+            top = min(overlapping, key=lambda d: cursor_priority.index(d.id))
+            sense.set_pixel(cx, cy, top.color)
+            all_overlapping.extend(overlapping)
 
     # 捕獲判定
-    res=[] #捕まった逃走者のdeviceリスト
+    res = []
     if target_id != HUNTER_ID:
-        #注目するカーソル(target_id)が逃走者
-        # 鬼でないカーソルが移動してきた場合：そこに鬼がいるか確認
-        hunter_present = any(dev.id == HUNTER_ID for dev in overlapping)
+        hunter_present = any(dev.id == HUNTER_ID for dev in all_overlapping)
         print(f"hunter_present = {hunter_present} in side of runner")
         if hunter_present:
             res = [devices[target_id]]
         print(f"cursor_enter res = {debug_device_list(res)} in side of runner")
     else:
-        #注目するカーソル(target_id)が鬼
-        # 鬼が移動してきた場合：そこに逃走者がいるか確認（鬼以外）
-        res = [dev for dev in overlapping if dev.id != HUNTER_ID]
+        res = [dev for dev in all_overlapping if dev.id != HUNTER_ID]
         print(f"cursor_enter res = {debug_device_list(res)} in side of hunter")
     # 捕獲後の通知
     if len(res)>0:
