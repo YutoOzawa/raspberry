@@ -228,6 +228,8 @@ operation_lock_until = 0  # when normal operation resumes
 purple_info = {"pi": None, "pos": (0, 0), "active": False}
 # speed boost timers per cursor
 speed_boost_until = {dev.id: 0.0 for dev in devices.values()}
+# freeze timers per cursor
+freeze_until = {dev.id: 0.0 for dev in devices.values()}
 
 exit_flag = False  # プログラム終了要求フラグ
 
@@ -344,7 +346,10 @@ def cursor_enter(new_x, new_y, color, target_id):
     ):
         sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
         purple_info["active"] = False
-        broadcast_message(f"BOOST {target_id}")
+        if target_id == 0:
+            broadcast_message(f"FREEZE {target_id}")
+        else:
+            broadcast_message(f"BOOST {target_id}")
 
                 
 def print_all_cursor_status():
@@ -592,6 +597,10 @@ def network_listener():
                     print(f"[MOVE] Cursor {cursor_id} is not alive, skipping move.")
                     continue
 
+                if freeze_until.get(cursor_id, 0) > time.time():
+                    print(f"[MOVE] Cursor {cursor_id} is frozen, ignoring move.")
+                    continue
+
                 # カーソルの現在位置
                 x = cursor_dev.position[0]
                 y = cursor_dev.position[1]
@@ -664,6 +673,12 @@ def network_listener():
             elif command == "BOOST":
                 cid = int(parts[1])
                 speed_boost_until[cid] = time.time() + BOOST_DURATION
+                if purple_info["active"] and purple_info["pi"] == MY_PI_ID:
+                    sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
+                purple_info["active"] = False
+            elif command == "FREEZE":
+                cid = int(parts[1])
+                freeze_until[cid] = time.time() + BOOST_DURATION
                 if purple_info["active"] and purple_info["pi"] == MY_PI_ID:
                     sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
                 purple_info["active"] = False
@@ -769,6 +784,10 @@ if __name__ == "__main__":
                 exit()
 
             direction = get_direction()
+
+            if freeze_until.get(MY_PI_ID, 0) > time.time():
+                time.sleep(TIME_INTERVAL)
+                continue
 
             if direction:
                 if MY_PI.onMyPi:
