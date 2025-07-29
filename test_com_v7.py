@@ -9,6 +9,7 @@ import time
 import socket
 import threading
 import random
+import json
 
 sense = SenseHat()
 
@@ -188,6 +189,40 @@ cursor_priority = sorted(devices.keys())
 #鬼のラズパイのID
 HUNTER_ID=0
 
+# --- GUI broadcast settings ---
+# GUI側で用いるプレイヤー名へのマッピング
+NAME_MAP = {0: "oni", 1: "play1", 2: "play2", 3: "play3"}
+
+# ブロードキャスト先アドレス
+GUI_BCAST_ADDR = ("192.168.10.255", 12345)
+
+gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+gui_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+def broadcast_gui(data: dict):
+    """main_gui.pyへ情報を送信する"""
+    try:
+        gui_sock.sendto(json.dumps(data).encode(), GUI_BCAST_ADDR)
+    except Exception as e:
+        print(f"GUI send error: {e}")
+
+
+def broadcast_led_matrix(name: str):
+    """LEDマトリクスの変更点のみを送信する"""
+    prev = sense.get_pixels()
+    full = [[prev[i * 8 + j] for j in range(8)] for i in range(8)]
+    broadcast_gui({"type": "matrix", "name": name, "matrix": full})
+    while True:
+        matrix = sense.get_pixels()
+        changes = []
+        for idx, color in enumerate(matrix):
+            if color != prev[idx]:
+                prev[idx] = color
+                changes.append([idx // 8, idx % 8, color])
+        if changes:
+            broadcast_gui({"type": "delta", "name": name, "changes": changes})
+        time.sleep(0.5)
+
 # --- layout handling ---
 layout = [0, 1, 2, 3]  # [top-left, top-right, bottom-left, bottom-right]
 
@@ -337,6 +372,9 @@ def cursor_enter(new_x, new_y, color, target_id):
         for dev in devices.values():
             if dev.alive:
                 send_message(message, dev.addr)
+        # GUIへの通知
+        for cid in caught_ids:
+            broadcast_gui({"type": "catch", "target": NAME_MAP[int(cid)]})
 
     # purple power-up check
     if (
@@ -760,6 +798,10 @@ if __name__ == "__main__":
         purple_thread = threading.Thread(target=purple_spawn_loop, daemon=True)
         purple_thread.start()
 
+    # GUIへのLEDマトリクス送信用スレッド
+    my_name = NAME_MAP.get(MY_PI_ID)
+    threading.Thread(target=broadcast_led_matrix, args=(my_name,), daemon=True).start()
+
     sense.clear()
     draw_cursor(MY_PI.position[0], MY_PI.position[1], MY_PI.color, MY_PI.cursor_size)
 
@@ -779,8 +821,12 @@ if __name__ == "__main__":
             if timer_triggered:
                 print("Time out")
                 time.sleep(10.0)
+                if MY_PI_ID == HUNTER_ID:
+                    broadcast_gui({"type": "lose"})
 
             if ONI and isAllDeath():
+                if MY_PI_ID == HUNTER_ID:
+                    broadcast_gui({"type": "win"})
                 exit()
 
             direction = get_direction()

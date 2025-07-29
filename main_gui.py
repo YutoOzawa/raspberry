@@ -22,32 +22,32 @@ class GameGUI:
         self.root = root
         self.root.title("鬼ごっこ")
 
-        # === 设置全局字体、背景色 ===
+        # === フォントと背景色の設定 ===
         default_font = ("Yu Gothic UI", 12)
         title_font = ("Yu Gothic UI", 14, "bold")
         timer_font = ("Yu Gothic UI", 28, "bold")
 
-        self.root.configure(bg="#f0f0f5")  # 主窗口背景统一
+        self.root.configure(bg="#f0f0f5")  # メインウィンドウの背景を統一
 
-        # 主容器：水平排列
+        # メインコンテナ（横並び）
         self.main_frame = tk.Frame(root)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 左侧：信息面板
+        # 左側: 情報パネル
         self.left_frame = tk.Frame(self.main_frame, bg="#f0f0f5", bd=2, relief="ridge")
         self.left_frame.pack(side=tk.LEFT, padx=20, pady=20, anchor="n")
 
-        # ====== ⏱️ 剩余时间区域 ======
+        # ====== ⏱️ 残り時間エリア ======
         time_frame = tk.Frame(self.left_frame, bg="#f0f0f5")
-        time_frame.pack(pady=(10, 30), anchor="w")  # 留更大间隔和玩家状态分开
+        time_frame.pack(pady=(10, 30), anchor="w")  # プレイヤー表示との間隔
 
         time_title = tk.Label(time_frame, text="🕒  残り時間", font=title_font, bg="#f0f0f5", fg="#333333")
         time_title.pack(anchor="w")
 
         self.timer_label = tk.Label(time_frame, text="   00:00", font=timer_font,  fg="#008080", bg="#f0f0f5")
-        self.timer_label.pack(anchor="w", pady=5)  # 更好看的蓝绿色
+        self.timer_label.pack(anchor="w", pady=5)  # 見やすい青緑色
 
-        # ====== 👥 玩家状态区域 ======
+        # ====== 👥 プレイヤー状態エリア ======
         status_frame = tk.Frame(self.left_frame, bg="#f0f0f5")
         status_frame.pack(anchor="w")
 
@@ -71,29 +71,33 @@ class GameGUI:
 
         self.led_canvases = {}
         self.led_names = ["oni", "play1", "play2", "play3"]
+        self.current_matrix = {
+            name: [[[0, 0, 0] for _ in range(8)] for _ in range(8)]
+            for name in self.led_names
+        }
 
 
-        # 新增变量
+        # 追加変数
         self.timer_running = False
         self.timer_paused = False
-        self.timer_after_id = None  # after ID 用于取消计时
+        self.timer_after_id = None  # after ID はキャンセル用
 
-        # 输入框区域
+        # 入力欄エリア
         input_frame = tk.Frame(self.left_frame, bg="#f0f0f5")
         input_frame.pack(pady=(5, 10), anchor="w")
 
         tk.Label(input_frame, text="分:", bg="#f0f0f5", fg="#333333").pack(side=tk.LEFT)
         self.min_entry = tk.Entry(input_frame, width=3, font=default_font, bg="#ffffff", fg="#333333")
-        self.min_entry.insert(0, "00")  # 默认 00 分
+        self.min_entry.insert(0, "00")  # デフォルトは00分
         self.min_entry.pack(side=tk.LEFT)
 
         tk.Label(input_frame, text="秒:", bg="#f0f0f5", fg="#333333").pack(side=tk.LEFT)
         self.sec_entry = tk.Entry(input_frame, width=3, font=default_font, bg="#ffffff", fg="#333333")
-        self.sec_entry.insert(0, "00")  # 默认 00 秒
+        self.sec_entry.insert(0, "00")  # デフォルトは00秒
         self.sec_entry.pack(side=tk.LEFT)
 
 
-        # 按钮区域
+        # ボタンエリア
         button_frame = tk.Frame(self.left_frame, bg="#f0f0f5")
         button_frame.pack(pady=5, anchor="w")
 
@@ -113,7 +117,7 @@ class GameGUI:
             canvas = tk.Canvas(self.right_frame, width=160, height=160, bg="white")
             canvas.grid(row=row * 2, column=col, padx=10, pady=5)
 
-            # 绘制 8x8 小格子，每个格子 20x20 像素
+            # 8x8の小さなマスを描画（各20x20ピクセル）
             cell_size = 20
             for r in range(8):
                 for c in range(8):
@@ -151,7 +155,7 @@ class GameGUI:
                 seconds = int(self.sec_entry.get())
                 self.time_left = minutes * 60 + seconds
             except ValueError:
-                self.time_left = 30  # 默认30秒
+                self.time_left = 30  # デフォルトは30秒
 
             self.timer_running = True
             self.timer_paused = False
@@ -175,13 +179,13 @@ class GameGUI:
             self.root.after_cancel(self.timer_after_id)
             self.timer_after_id = None
 
-        # 重新读取输入框的值作为时间
+        # 入力欄から時間を再取得
         try:
             minutes = int(self.min_entry.get())
             seconds = int(self.sec_entry.get())
             self.time_left = minutes * 60 + seconds
         except ValueError:
-            self.time_left = 30  # 默认30秒
+            self.time_left = 30  # デフォルトは30秒
 
         minutes = self.time_left // 60
         seconds = self.time_left % 60
@@ -218,12 +222,13 @@ class GameGUI:
         if name in self.player_status and self.player_status[name] == "捕まった":
             return
 
+        self.current_matrix[name] = [row[:] for row in matrix]
         canvas = self.led_canvases[name]
         canvas.delete("led")
         cell_size = 20
-        oni_drawn = False  # 是否画了大的鬼
+        oni_drawn = False  # 大きな鬼を描画したか
 
-        # === 检查是否存在2x2红色区域 ===
+        # === 2x2の赤色領域があるか確認 ===
         for i in range(7):
             for j in range(7):
                 try:
@@ -233,7 +238,7 @@ class GameGUI:
                             matrix[i + 1][j] == [255, 0, 0] and
                             matrix[i + 1][j + 1] == [255, 0, 0]
                     ):
-                        # 在整个2x2区域中心绘制大鬼图标
+                        # 2x2領域の中心に大きな鬼アイコンを描画
                         x_center = (j + 1) * cell_size
                         y_center = (i + 1) * cell_size
                         canvas.create_text(
@@ -247,7 +252,7 @@ class GameGUI:
             if oni_drawn:
                 break
 
-        # === 绘制其他非红色像素 ===
+        # === その他の非赤色ピクセルを描画 ===
         for i in range(8):
             for j in range(8):
                 try:
@@ -255,7 +260,7 @@ class GameGUI:
                     if (r, g, b) == (0, 0, 0):
                         continue
 
-                    # 忽略红色鬼图标的四个像素
+                    # 赤鬼アイコンの4ピクセルは無視
                     if oni_drawn and matrix[i][j] == [255, 0, 0]:
                         continue
 
@@ -267,6 +272,16 @@ class GameGUI:
                     canvas.create_rectangle(x1, y1, x2, y2, outline="gray", fill=color, tags="led")
                 except:
                     continue
+
+    def apply_delta(self, name, changes):
+        """受信した変更点を既存マトリクスに反映"""
+        if name not in self.current_matrix:
+            return
+        matrix = self.current_matrix[name]
+        for i, j, color in changes:
+            if 0 <= i < 8 and 0 <= j < 8:
+                matrix[i][j] = color
+        self.draw_led_matrix(name, matrix)
 
     def handle_event(self, event):
         if event["type"] == "catch":
@@ -310,7 +325,8 @@ def listen_broadcast(gui):
             msg = json.loads(data.decode())
             if msg["type"] == "matrix":
                 gui.draw_led_matrix(msg["name"], msg["matrix"])
-                print("1234")
+            elif msg["type"] == "delta":
+                gui.apply_delta(msg["name"], msg["changes"])
             elif msg["type"] in ["catch", "escaped", "win", "lose"]:
                 gui.handle_event(msg)
         except:
