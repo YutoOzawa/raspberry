@@ -74,8 +74,13 @@ def show_digit(digit: int, duration: float = 1.5):
         time.sleep(duration)
         sense.clear()
 
+def get_alive_pi_ids() -> List[int]:
+    """Return a list of IDs for Pis that are currently marked alive."""
+    return [dev.id for dev in devices.values() if dev.alive]
+
+
 def handle_shuffle(new_order: List[int]):
-    """Handle layout shuffling and show the identifier of the target Pi."""
+    """Handle layout shuffling and show a unique identifier for this Pi."""
     global layout, operation_lock_until
 
     old_order = layout[:]
@@ -87,17 +92,20 @@ def handle_shuffle(new_order: List[int]):
 
     operation_lock_until = time.time() + 10
 
-    # Map each device to the identifier currently occupying its
-    # destination.  Using the old order ensures every displayed digit is
-    # drawn exactly once from the set of active Pis.
-    dest_map = {}
-    for i, dev_id in enumerate(new_order):
-        if i < len(old_order):
-            dest_map[dev_id] = old_order[i]
+    # Determine the digits to display.  We use the set of currently alive
+    # Pis and shuffle them using a deterministic seed so every Pi computes
+    # the same mapping.
+    alive_ids = get_alive_pi_ids()
+    digits = alive_ids[:]
 
-    target_pi = dest_map.get(MY_PI_ID, MY_PI_ID)
+    rand = random.Random(sum(new_order))  # deterministic across devices
+    rand.shuffle(digits)
 
-    show_digit(target_pi)
+    dest_map = {dev_id: digits[i] for i, dev_id in enumerate(new_order)}
+
+    target_digit = dest_map.get(MY_PI_ID, MY_PI_ID)
+
+    show_digit(target_digit)
 
     # redraw cursors after digit display
     for dev in devices.values():
@@ -215,14 +223,22 @@ def draw_cursor(x, y, color, size):
                 sense.set_pixel(x + dx, y + dy, color)
 
 # そのピクセルに現在存在するカーソルのリストを取得
+def covers_pixel(dev: "DeviceInfo", x: int, y: int) -> bool:
+    """Return True if the device covers the pixel at (x, y)."""
+    return (
+        dev.position[0] <= x < dev.position[0] + dev.cursor_size
+        and dev.position[1] <= y < dev.position[1] + dev.cursor_size
+    )
+
+
 def get_overlapping_cursors(x, y):
     print_all_cursor_status()
     overlapping = []
     for dev_id in cursor_priority:
         dev = devices[dev_id]
-        if dev.onMyPi and dev.position == [x, y]:
+        if dev.onMyPi and covers_pixel(dev, x, y):
             overlapping.append(dev)
-    
+
     return overlapping
             
 
@@ -503,6 +519,9 @@ def network_listener():
                     print(f"[CATCH] Marked Pi{cid} as not alive.")
                     if cid in layout:
                         layout.remove(cid)
+                    if devices[cid].onMyPi:
+                        cursor_leave(devices[cid].position[0], devices[cid].position[1], cid)
+                        devices[cid].onMyPi = False
 
                 # Update adjacency info for remaining devices
                 for dev_id, adj in compute_adj_from_layout(layout).items():
