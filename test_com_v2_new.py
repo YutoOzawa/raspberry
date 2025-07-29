@@ -1,4 +1,7 @@
-from sense_hat import SenseHat
+try:
+    from sense_hat import SenseHat  # real hardware
+except Exception:  # fallback for environments without RTIMU
+    from sense_emu import SenseHat
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 import sys
@@ -16,8 +19,90 @@ BLUE = [0, 0, 255]
 YELLOW = [255, 255, 0]
 CLEAR = [0, 0, 0]
 
-# 一時停止時間（秒）
-PAUSE_DURATION = 3
+# 隣接するラズパイが存在しないことを示す値
+NO_NEIGHBOR = 9
+
+WHITE = [255, 255, 255]
+
+digit_patterns = {
+    0: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    1: [
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, WHITE, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        CLEAR, CLEAR, WHITE, WHITE, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    2: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+    3: [
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, WHITE,
+        WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
+    ],
+}
+
+def show_digit(digit: int, duration: float = 1.5):
+    pattern = digit_patterns.get(digit)
+    if pattern:
+        sense.set_pixels(pattern)
+        time.sleep(duration)
+        sense.clear()
+
+def handle_shuffle(new_order: List[int]):
+    """Handle layout shuffling and show the identifier of the target Pi."""
+    global layout, operation_lock_until
+
+    old_order = layout[:]
+    layout = new_order
+
+    # update adjacency for currently active devices
+    for dev_id, adj in compute_adj_from_layout(layout).items():
+        devices[dev_id].adj = adj
+
+    operation_lock_until = time.time() + 10
+
+    # Map each device to the identifier currently occupying its
+    # destination.  Using the old order ensures every displayed digit is
+    # drawn exactly once from the set of active Pis.
+    dest_map = {}
+    for i, dev_id in enumerate(new_order):
+        if i < len(old_order):
+            dest_map[dev_id] = old_order[i]
+
+    target_pi = dest_map.get(MY_PI_ID, MY_PI_ID)
+
+    show_digit(target_pi)
+
+    # redraw cursors after digit display
+    for dev in devices.values():
+        if dev.onMyPi:
+            draw_cursor(dev.position[0], dev.position[1], dev.color, dev.cursor_size)
 
 # RGB値から変数名を取得する関数
 def get_color_name(rgb):
@@ -37,16 +122,18 @@ class DeviceInfo:
     addr: str
     color: Tuple[int, int, int]
     position: List[int]
-    adj: Tuple[int, int] # [上下のPiのID, 左右のPiのID]
+    adj: Tuple[int, int, int, int]  # (up, right, down, left)
     onMyPi: bool
     alive: bool
+    cursor_size: int
+    move_step: int
 
 # ラズパイ群（4台）
 devices: Dict[int, DeviceInfo] = {
-    0: DeviceInfo(0, "192.168.10.1", RED, [2, 2], (2, 1), False, True),
-    1: DeviceInfo(1, "192.168.10.2", GREEN, [2, 2], (3, 0), False, True),
-    2: DeviceInfo(2, "192.168.10.3", BLUE, [2, 2], (0, 3), False, True),
-    3: DeviceInfo(3, "192.168.10.4", YELLOW, [2, 2], (1, 2), False, True),
+    0: DeviceInfo(0, "192.168.10.1", RED, [2, 2], (2, 9, 9 , 1), False, True, 2, 2),
+    1: DeviceInfo(1, "192.168.10.2", GREEN, [2, 2], (3, 0, 9, 9), False, True, 1, 1),
+    2: DeviceInfo(2, "192.168.10.3", BLUE, [2, 2], (9, 9, 0, 3), False, True, 1, 1),
+    3: DeviceInfo(3, "192.168.10.4", YELLOW, [2, 2], (9, 2, 1, 9), False, True, 1, 1),
 }
 
 # 自身のラズパイ（引数にて指定）
@@ -70,8 +157,6 @@ BUFFER_SIZE = 1024
 
 # LEDマトリクスとカーソルの設定
 WIDTH, HEIGHT = 8, 8
-CURSOR_SIZE = 2
-MOVE_STEP = 2
 
 # センサー感度
 TILT_THRESHOLD = 0.3
@@ -82,26 +167,69 @@ cursor_priority = sorted(devices.keys())
 #鬼のラズパイのID
 HUNTER_ID=0
 
+# --- layout handling ---
+layout = [0, 1, 2, 3]  # [top-left, top-right, bottom-left, bottom-right]
+
+def compute_adj_from_layout(order: List[int]) -> Dict[int, Tuple[int, int, int, int]]:
+    """Compute (up, right, down, left) adjacency from the current layout."""
+
+    # Map layout positions to their neighbour positions on a 2x2 grid
+    mapping = {
+        0: {"up": None, "right": 1, "down": 2, "left": None},
+        1: {"up": None, "right": None, "down": 3, "left": 0},
+        2: {"up": 0, "right": 3, "down": None, "left": None},
+        3: {"up": 1, "right": None, "down": None, "left": 2},
+    }
+
+    padded = order + [NO_NEIGHBOR] * (4 - len(order))
+    result = {}
+
+    for pos, dev_id in enumerate(padded):
+        if dev_id == NO_NEIGHBOR:
+            continue
+        neighbours = mapping[pos]
+        adj = (
+            padded[neighbours["up"]] if neighbours["up"] is not None else NO_NEIGHBOR,
+            padded[neighbours["right"]] if neighbours["right"] is not None else NO_NEIGHBOR,
+            padded[neighbours["down"]] if neighbours["down"] is not None else NO_NEIGHBOR,
+            padded[neighbours["left"]] if neighbours["left"] is not None else NO_NEIGHBOR,
+        )
+        result[dev_id] = adj
+
+    return result
+
+for dev_id, adj in compute_adj_from_layout(layout).items():
+    devices[dev_id].adj = adj
+
+operation_lock_until = 0  # when normal operation resumes
+
 exit_flag = False  # プログラム終了要求フラグ
-operation_lock_until = 0  # 通常操作が再開する時刻
 
 
 # 指定された座標にカーソルを描画する
-def draw_cursor(x, y, color):
-    for dx in range(CURSOR_SIZE):
-        for dy in range(CURSOR_SIZE):
+def draw_cursor(x, y, color, size):
+    for dx in range(size):
+        for dy in range(size):
             # 念のため範囲外描画を防ぐ
             if 0 <= x + dx < WIDTH and 0 <= y + dy < HEIGHT:
                 sense.set_pixel(x + dx, y + dy, color)
 
 # そのピクセルに現在存在するカーソルのリストを取得
+# 指定された座標とサイズの矩形と重なるカーソルのリストを取得
 def get_overlapping_cursors(x, y):
     print_all_cursor_status()
     overlapping = []
     for dev_id in cursor_priority:
         dev = devices[dev_id]
-        if dev.onMyPi and dev.position == [x, y]:
-            overlapping.append(dev)
+        if dev.onMyPi:
+            # 修正前: 左上の座標が一致するかどうかしか見ていなかった
+            # if dev.position == [x, y]:
+
+            # 修正後: カーソルのサイズを考慮し、(x, y)がカーソルの範囲内かチェック
+            px, py = dev.position
+            size = dev.cursor_size
+            if (px <= x < px + size) and (py <= y < py  + size):
+                overlapping.append(dev)
     
     return overlapping
             
@@ -117,20 +245,21 @@ def cursor_leave(x, y, target_id):
     print(f"[{x},{y}] overlapping: {filtered_display} in cursor_leave target_id={target_id}")
     if len(filtered) > 0:
         top = min(filtered, key=lambda d: cursor_priority.index(d.id))
-        draw_cursor(x, y, top.color)
+        draw_cursor(x, y, top.color, top.cursor_size)
     else:
-        draw_cursor(x, y, CLEAR)
+        draw_cursor(x, y, CLEAR, devices[target_id].cursor_size)
 
 # カーソルがあるマスから動いた時に、移動先のカーソルを表示
 #（重複判定し、カーソルの移動後の移動先が自身のカーソルか、別のカーソルを表示するかも判定）
 def cursor_enter(new_x, new_y, color, target_id):
+    size = devices[target_id].cursor_size
     overlapping = get_overlapping_cursors(new_x, new_y)
     overlapping.append(devices[target_id]) #移動先には自カーソルがないので、自カーソルを追加
     overlapping_display = [(dev.id, get_color_name(dev.color)) for dev in overlapping]
     print(f"[{new_x},{new_y}] overlapping: {overlapping_display} in cursor_enter")
 
     top = min(overlapping, key=lambda d: cursor_priority.index(d.id))
-    draw_cursor(new_x, new_y, top.color)
+    draw_cursor(new_x, new_y, top.color, top.cursor_size)
     
 
     # 捕獲判定
@@ -170,7 +299,6 @@ def debug_device_list(devices_list):
 
 # 加速度センサーの値から傾きの方向を判定する
 def get_direction():
-    sense = SenseHat()
     orientation = sense.get_orientation_radians()
 
     # ピッチとロールを整数値として抽出（四捨五入）
@@ -184,14 +312,14 @@ def get_direction():
 
     if (flag == 1):
         if 20 <= pitch <= 90:
-            return "right"
-        elif -90 <= pitch <= -20:
             return "left"
+        elif -90 <= pitch <= -20:
+            return "right"
     else:
         if 20 <= roll <= 90:
-            return "up"
-        elif -90 <= roll <= -20:
             return "down"
+        elif -90 <= roll <= -20:
+            return "up"
     return None
 
 # 指定されたメッセージを指定された宛先のPiにUDPで送信する
@@ -201,79 +329,93 @@ def send_message(message, dst_addr):
         sock.sendto(message.encode(), (dst_addr, DST_PORT))
         print(f"Send {message} to {dst_addr}")
 
-# 移動先の座標を求める & 遷移判定
-def get_new_position(old_x, old_y, direction):
-    hasCrossed = True
+def broadcast_message(message):
+    for dev in devices.values():
+        send_message(message, dev.addr)
 
-    # 現在位置から移動先を計算
-    new_x, new_y = old_x, old_y
-    if direction == "up":    new_y += MOVE_STEP
-    if direction == "down":  new_y -= MOVE_STEP
-    if direction == "left":  new_x += MOVE_STEP
-    if direction == "right": new_x -= MOVE_STEP
+def trigger_shuffle():
+    """Shuffle the layout of currently active devices."""
+    active = [dev.id for dev in devices.values() if dev.alive]
+    if len(active) <= 1:
+        return
 
-    # 1. 左右の壁の処理 (画面内に収める)
-    # if next_x < 0:
-    #     next_x = 0
-    # if next_x > WIDTH - CURSOR_SIZE:
-    #     next_x = WIDTH - CURSOR_SIZE
+    original = active[:]
+    new_layout = active[:]
+    while new_layout == original:
+        random.shuffle(new_layout)
 
-    if new_y > HEIGHT - CURSOR_SIZE: new_y = 0   # 上のラズパイに遷移
-    elif new_y < 0: new_y = HEIGHT - CURSOR_SIZE # 下のラズパイに遷移
-    elif new_x > WIDTH - CURSOR_SIZE: new_x = 0  # 左のラズパイに遷移
-    elif new_x < 0: new_x = WIDTH - CURSOR_SIZE  # 右のラズパイに遷移
-    else: hasCrossed = False                     # 遷移しない
-    
-    return new_x, new_y, hasCrossed
+    msg = "SHUFFLE " + ",".join(str(i) for i in new_layout)
+    broadcast_message(msg)
+    handle_shuffle(new_layout)
 
-# 遷移先のPiを求める
-def get_next_pi(direction, adj: Tuple[int, int]):
-    if direction in ["up", "down"]:
-        return adj[0] if adj[0] is not None else -1  # -1: 無効な移動先
-    else:
-        return adj[1] if adj[1] is not None else -1
-
- # 偶数のみを選ぶ範囲でランダムに座標を決定   
-def random_even_coordinate(max_value):
-    even_range = list(range(0, max_value + 1, 2))  # 0, 2, 4, 6 ...
-    return random.choice(even_range)
-
-# スティック押し込みを検知
-def check_swap_button():
+def check_shuffle_button():
     for event in sense.stick.get_events():
         if event.action == 'pressed' and event.direction == 'middle':
             return True
     return False
 
-# ラズパイの位置入れ替えをトリガー
-def trigger_swap():
-    global operation_lock_until
-    alive_ids = [dev.id for dev in devices.values() if dev.alive]
-    if len(alive_ids) <= 1:
-        return
-    dest_ids = alive_ids[:]
-    while True:
-        random.shuffle(dest_ids)
-        if all(s != d for s, d in zip(alive_ids, dest_ids)):
-            break
-    pairs = list(zip(alive_ids, dest_ids))
-    display_swap_pairs(pairs)
-    operation_lock_until = time.time() + PAUSE_DURATION
+# 移動先の座標を求める & 遷移判定
+def get_new_position(old_x, old_y, direction, size, step, adj):
+    """Return the next position of a cursor and whether it crossed to another Pi."""
+    hasCrossed = False
 
-# テレポート先をSense HATに表示する
-def display_swap_pairs(pairs: List[Tuple[int, int]]):
-    if not pairs:
-        return
-    message = ", ".join(f"{src}->{dst}" for src, dst in pairs)
-    sense.show_message(message, text_colour=YELLOW)
-    time.sleep(1)
-    sense.clear()
+    # Compute tentative position based on direction and step size
+    new_x, new_y = old_x, old_y
+    if direction == "up":
+        new_y -= step
+    if direction == "down":
+        new_y += step
+    if direction == "left":
+        new_x -= step
+    if direction == "right":
+        new_x += step
+
+    # Vertical bounds
+    if new_y < 0:
+        if adj[0] != NO_NEIGHBOR:
+            new_y = HEIGHT - size
+            hasCrossed = True
+        else:
+            new_y = 0
+    elif new_y > HEIGHT - size:
+        if adj[2] != NO_NEIGHBOR:
+            new_y = 0
+            hasCrossed = True
+        else:
+            new_y = HEIGHT - size
+
+    # Horizontal bounds
+    if new_x < 0:
+        if adj[3] != NO_NEIGHBOR:
+            new_x = WIDTH - size
+            hasCrossed = True
+        else:
+            new_x = 0
+    elif new_x > WIDTH - size:
+        if adj[1] != NO_NEIGHBOR:
+            new_x = 0
+            hasCrossed = True
+        else:
+            new_x = WIDTH - size
+
+    return new_x, new_y, hasCrossed
+
+# 遷移先のPiを求める
+def get_next_pi(direction, adj: Tuple[int, int, int, int]):
+    mapping = {"up": 0, "right": 1, "down": 2, "left": 3}
+    idx = mapping.get(direction)
+    if idx is None:
+        return -1
+    return adj[idx] if adj[idx] != NO_NEIGHBOR else -1
+
+def random_coordinate(max_value, step):
+    values = list(range(0, max_value + 1, step))
+    return random.choice(values)
 
 # ネットワークリスナー（サーバプログラム）
 def network_listener():
     global my_cursor_locator
     global exit_flag
-    global operation_lock_until
     
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind((MY_PI.addr, DST_PORT))
@@ -293,19 +435,29 @@ def network_listener():
                 direction = parts[1]
                 cursor_id = int(parts[2])
 
-                
 
-                # 送信元Piを特定
+
+                # 送信元Piを特定（操作しているPi）
                 sender_ip = addr_port[0]
                 sender_id = addr_to_id.get(sender_ip)
                 sender = devices[sender_id]
-                
+
+                # 実際に動かすカーソルのデバイス情報
+                cursor_dev = devices[cursor_id]
+
                 # カーソルの現在位置
-                x = sender.position[0]
-                y = sender.position[1]
+                x = cursor_dev.position[0]
+                y = cursor_dev.position[1]
 
                 # 移動先座標の計算と遷移判定
-                new_x, new_y, hasCrossed = get_new_position(x, y, direction)
+                new_x, new_y, hasCrossed = get_new_position(
+                    x,
+                    y,
+                    direction,
+                    cursor_dev.cursor_size,
+                    cursor_dev.move_step,
+                    MY_PI.adj,
+                )
                 print(f"[MOVE] cursor_id={cursor_id} (x, y)=({x}, {y}), new=({new_x}, {new_y})")
 
                 if hasCrossed: # 座標の境界を超える
@@ -316,17 +468,17 @@ def network_listener():
                     if next_pi == MY_PI_ID:
                         #if is_movable(new_x, new_y): # 重複判定
                         cursor_leave(x, y, cursor_id)
-                        cursor_enter(new_x, new_y, sender.color, cursor_id)
-                        sender.position = [new_x, new_y]
+                        cursor_enter(new_x, new_y, cursor_dev.color, cursor_id)
+                        cursor_dev.position = [new_x, new_y]
                     else:
                         send_message(f"CROSS {next_pi} {new_x} {new_y} {cursor_id}", sender.addr)
-                        sender.onMyPi = False
+                        cursor_dev.onMyPi = False
                         cursor_leave(x, y, cursor_id)
                 else:
-                    #update_position(x, y, new_x, new_y, sender)
+                    #update_position(x, y, new_x, new_y, cursor_dev)
                     cursor_leave(x, y, cursor_id)
-                    cursor_enter(new_x, new_y, sender.color, cursor_id)
-                    sender.position = [new_x, new_y]
+                    cursor_enter(new_x, new_y, cursor_dev.color, cursor_id)
+                    cursor_dev.position = [new_x, new_y]
 
             elif command == "DRAW": # 他のPiのカーソルを新たに描画
                 x, y, pi, cursor_id = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
@@ -347,36 +499,31 @@ def network_listener():
                     next_addr = devices.get(next_pi).addr
                     send_message(f"DRAW {x} {y} {MY_PI_ID} {cursor_id}", next_addr)
                     my_cursor_locator = next_addr
+            elif command == "SHUFFLE":
+                new_order = list(map(int, parts[1].split(',')))
+                handle_shuffle(new_order)
             elif command == "CATCH":
                 num = int(parts[1])
                 caught_ids = list(map(int, parts[2:2+num])) #捕獲された逃走者のID
                 print(f"[CATCH] Received catch list: {caught_ids}")
                 # devicesのalive情報を更新
                 for cid in caught_ids:
-                    devices[cid].alive = False #@
+                    devices[cid].alive = False 
                     print(f"[CATCH] Marked Pi{cid} as not alive.")
+                    caught_dev = devices[cid]
+                    # 脱落したカーソルがこのPiの画面上にある場合
+                    if caught_dev.onMyPi:
+                        print(f"[CATCH] Removing caught cursor {cid} from my screen.")
+                        # 画面からカーソルを消去する
+                        cursor_leave(caught_dev.position[0], caught_dev.position[1], cid)
+                        caught_dev.onMyPi = False # 画面上からいなくなったことを記録
+                    if cid in layout:
+                        layout.remove(cid)
 
-                # CATCHコマンドを受け取ったラズパイが捕獲されていなかった場合、
-                # 自身のadjを生存Piだけに制限する
-                if MY_PI_ID not in caught_ids:
-                    new_adj = list(devices[MY_PI_ID].adj)  # 一旦リスト化して変更可能に
-
-                    for i, neighbor_id in enumerate(new_adj):
-                        if not devices[neighbor_id].alive:
-                            print(f"[CATCH] Pi{neighbor_id} is dead. Removing from adj of Pi{MY_PI_ID}")
-                            new_adj[i] = None  # 生存していないなら無効化
-
-                    devices[MY_PI_ID].adj = tuple(new_adj)
-                    print(f"[CATCH] Updated adj for Pi{MY_PI_ID}: {devices[MY_PI_ID].adj}")
-                # 生存PiのID一覧（ソートしておくと循環割り当てが安定）
-                alive_ids = sorted([dev.id for dev in devices.values() if dev.alive])
-
-                n = len(alive_ids)
-                for i, pi_id in enumerate(alive_ids):
-                    up_down_id = alive_ids[(i + 1) % n]  # 次の生存Piを上下に
-                    left_right_id = alive_ids[(i + 2) % n] if n > 2 else alive_ids[(i + 1) % n]  # 2台だけなら上下=左右
-                    devices[pi_id].adj = (up_down_id, left_right_id)
-                    print(f"[CATCH] Reconnected Pi{pi_id}: adj={devices[pi_id].adj}")
+                # Update adjacency info for remaining devices
+                for dev_id, adj in compute_adj_from_layout(layout).items():
+                    devices[dev_id].adj = adj
+                    print(f"[CATCH] Reconnected Pi{dev_id}: adj={devices[dev_id].adj}")
 
 
                 # 自分自身が捕まっているかチェックして終了処理
@@ -386,16 +533,14 @@ def network_listener():
                     print(f"[CATCH] Local alive devices on Pi{MY_PI_ID}: {[dev.id for dev in local_alive_devices]}")
 
                     # === ここでテレポート処理を追加 ===
-                    alive_pi_ids = [dev.id for dev in devices.values() if dev.alive]
-                    random.shuffle(alive_pi_ids)
-                    swap_pairs = []
+                    alive_pi_ids = [dev.id for dev in devices.values() if dev.alive] #テレポート先候補
+                    random.shuffle(alive_pi_ids) 
                     for dev, target_pi_id in zip(local_alive_devices, alive_pi_ids):
-                        target_x = random_even_coordinate(WIDTH - CURSOR_SIZE)
-                        target_y = random_even_coordinate(HEIGHT - CURSOR_SIZE)
+                        target_x = random_coordinate(WIDTH - dev.cursor_size, dev.move_step)
+                        target_y = random_coordinate(HEIGHT - dev.cursor_size, dev.move_step)
                         dest_pos = [target_x, target_y]
 
                         print(f"[CATCH] Teleporting Pi{dev.id} to Pi{target_pi_id} at {dest_pos}")
-                        swap_pairs.append((dev.id, target_pi_id))
 
                         if target_pi_id == MY_PI_ID:
                             # 自分のPiなら直接描画
@@ -407,12 +552,9 @@ def network_listener():
                             send_message(f"CROSS {target_pi_id} {dest_pos[0]} {dest_pos[1]} {dev.id}", dev.addr)
                             cursor_leave(dev.position[0], dev.position[1], dev.id)
 
-                    display_swap_pairs(swap_pairs)
-                    operation_lock_until = time.time() + PAUSE_DURATION
-
                     #MY_PI.alive = False
                     sense.show_message("CAUGHT!", text_colour=RED)
-                    time.sleep(1)
+                    time.sleep(1.5)
                     sense.clear()
                     exit_flag = True  # プログラム全体の終了を通知
                     return    # スレッド終了
@@ -434,15 +576,17 @@ if __name__ == "__main__":
     listener_thread.start()
 
     sense.clear()
-    draw_cursor(MY_PI.position[0], MY_PI.position[1], MY_PI.color)
+    draw_cursor(MY_PI.position[0], MY_PI.position[1], MY_PI.color, MY_PI.cursor_size)
 
     print_all_cursor_status()
 
     try:
         while not exit_flag:
-
-            if time.time() > operation_lock_until and check_swap_button():
-                trigger_swap()
+            # 自分が生存状態でなければ、一切の操作を停止
+            if not MY_PI.alive:
+                continue
+            if time.time() > operation_lock_until and check_shuffle_button():
+                trigger_shuffle()
                 continue
 
             if time.time() < operation_lock_until:
@@ -454,7 +598,14 @@ if __name__ == "__main__":
             if direction:
                 if MY_PI.onMyPi:
                     x, y = MY_PI.position
-                    new_x, new_y, hasCrossed = get_new_position(x, y, direction)
+                    new_x, new_y, hasCrossed = get_new_position(
+                        x,
+                        y,
+                        direction,
+                        MY_PI.cursor_size,
+                        MY_PI.move_step,
+                        MY_PI.adj,
+                    )
 
                     if hasCrossed: # 座標の境界を超える
                         next_pi = get_next_pi(direction, MY_PI.adj)
