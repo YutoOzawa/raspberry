@@ -18,11 +18,16 @@ GREEN = [0, 255, 0]
 BLUE = [0, 0, 255]
 YELLOW = [255, 255, 0]
 CLEAR = [0, 0, 0]
+PURPLE = [128, 0, 128]
 
 # 隣接するラズパイが存在しないことを示す値
 NO_NEIGHBOR = 9
 
 WHITE = [255, 255, 255]
+
+# purple event settings
+PURPLE_INTERVAL = 30.0  # seconds between purple spawns
+BOOST_DURATION = 3.0    # seconds of doubled speed
 
 digit_patterns = {
     0: [
@@ -219,6 +224,13 @@ for dev_id, adj in compute_adj_from_layout(layout).items():
 
 operation_lock_until = 0  # when normal operation resumes
 
+# purple event state
+purple_info = {"pi": None, "pos": (0, 0), "active": False}
+# speed boost timers per cursor
+speed_boost_until = {dev.id: 0.0 for dev in devices.values()}
+# freeze timers per cursor
+freeze_until = {dev.id: 0.0 for dev in devices.values()}
+
 exit_flag = False  # プログラム終了要求フラグ
 
 
@@ -325,6 +337,19 @@ def cursor_enter(new_x, new_y, color, target_id):
         for dev in devices.values():
             if dev.alive:
                 send_message(message, dev.addr)
+
+    # purple power-up check
+    if (
+        purple_info["active"]
+        and purple_info["pi"] == MY_PI_ID
+        and covers_pixel(devices[target_id], purple_info["pos"][0], purple_info["pos"][1])
+    ):
+        sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
+        purple_info["active"] = False
+        if target_id == 0:
+            broadcast_message(f"FREEZE {target_id}")
+        else:
+            broadcast_message(f"BOOST {target_id}")
 
                 
 def print_all_cursor_status():
@@ -512,6 +537,29 @@ def random_coordinate(max_value, step):
     values = list(range(0, max_value + 1, step))
     return random.choice(values)
 
+def current_move_step(dev_id: int) -> int:
+    """Return the move step for the device, applying boost if active."""
+    base = devices[dev_id].move_step
+    if speed_boost_until.get(dev_id, 0) > time.time():
+        return base * 2
+    return base
+
+def purple_spawn_loop():
+    """Periodically spawn a purple pixel on a random alive Pi."""
+    while True:
+        time.sleep(PURPLE_INTERVAL)
+        if MY_PI_ID != HUNTER_ID:
+            continue
+        if purple_info["active"]:
+            continue
+        alive = [dev.id for dev in devices.values() if dev.alive]
+        if not alive:
+            continue
+        target_pi = random.choice(alive)
+        x = random.randint(0, WIDTH - 1)
+        y = random.randint(0, HEIGHT - 1)
+        broadcast_message(f"PURPLE {target_pi} {x} {y}")
+
 # ネットワークリスナー（サーバプログラム）
 def network_listener():
     global my_cursor_locator
@@ -549,6 +597,10 @@ def network_listener():
                     print(f"[MOVE] Cursor {cursor_id} is not alive, skipping move.")
                     continue
 
+                if freeze_until.get(cursor_id, 0) > time.time():
+                    print(f"[MOVE] Cursor {cursor_id} is frozen, ignoring move.")
+                    continue
+
                 # カーソルの現在位置
                 x = cursor_dev.position[0]
                 y = cursor_dev.position[1]
@@ -559,7 +611,7 @@ def network_listener():
                     y,
                     direction,
                     cursor_dev.cursor_size,
-                    cursor_dev.move_step,
+                    current_move_step(cursor_id),
                     MY_PI.adj,
                 )
                 print(f"[MOVE] cursor_id={cursor_id} (x, y)=({x}, {y}), new=({new_x}, {new_y})")
@@ -609,6 +661,27 @@ def network_listener():
             elif command == "SHUFFLE":
                 new_order = list(map(int, parts[1].split(',')))
                 handle_shuffle(new_order)
+            elif command == "PURPLE":
+                target_pi = int(parts[1])
+                x = int(parts[2])
+                y = int(parts[3])
+                purple_info["pi"] = target_pi
+                purple_info["pos"] = (x, y)
+                purple_info["active"] = True
+                if MY_PI_ID == target_pi:
+                    sense.set_pixel(x, y, PURPLE)
+            elif command == "BOOST":
+                cid = int(parts[1])
+                speed_boost_until[cid] = time.time() + BOOST_DURATION
+                if purple_info["active"] and purple_info["pi"] == MY_PI_ID:
+                    sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
+                purple_info["active"] = False
+            elif command == "FREEZE":
+                cid = int(parts[1])
+                freeze_until[cid] = time.time() + BOOST_DURATION
+                if purple_info["active"] and purple_info["pi"] == MY_PI_ID:
+                    sense.set_pixel(purple_info["pos"][0], purple_info["pos"][1], CLEAR)
+                purple_info["active"] = False
             elif command == "CATCH":
                 num = int(parts[1])
                 caught_ids = list(map(int, parts[2:2+num])) #捕獲された逃走者のID
@@ -683,6 +756,10 @@ if __name__ == "__main__":
     listener_thread = threading.Thread(target=network_listener, daemon=True)
     listener_thread.start()
 
+    if MY_PI_ID == HUNTER_ID:
+        purple_thread = threading.Thread(target=purple_spawn_loop, daemon=True)
+        purple_thread.start()
+
     sense.clear()
     draw_cursor(MY_PI.position[0], MY_PI.position[1], MY_PI.color, MY_PI.cursor_size)
 
@@ -708,6 +785,10 @@ if __name__ == "__main__":
 
             direction = get_direction()
 
+            if freeze_until.get(MY_PI_ID, 0) > time.time():
+                time.sleep(TIME_INTERVAL)
+                continue
+
             if direction:
                 if MY_PI.onMyPi:
                     x, y = MY_PI.position
@@ -716,7 +797,7 @@ if __name__ == "__main__":
                         y,
                         direction,
                         MY_PI.cursor_size,
-                        MY_PI.move_step,
+                        current_move_step(MY_PI.id),
                         MY_PI.adj,
                     )
 
