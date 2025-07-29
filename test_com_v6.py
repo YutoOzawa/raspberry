@@ -143,7 +143,7 @@ class DeviceInfo:
 
 # ラズパイ群（4台）
 devices: Dict[int, DeviceInfo] = {
-    0: DeviceInfo(0, "192.168.10.1", RED, [2, 2], (2, 9, 9 , 1), False, True, 2, 2),
+    0: DeviceInfo(0, "192.168.10.1", RED, [2, 2], (2, 9, 9 , 1), False, True, 1, 1),
     1: DeviceInfo(1, "192.168.10.2", GREEN, [2, 2], (3, 0, 9, 9), False, True, 1, 1),
     2: DeviceInfo(2, "192.168.10.3", BLUE, [2, 2], (9, 9, 0, 3), False, True, 1, 1),
     3: DeviceInfo(3, "192.168.10.4", YELLOW, [2, 2], (9, 2, 1, 9), False, True, 1, 1),
